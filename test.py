@@ -5,11 +5,11 @@ import numpy as np
 from PIL import Image
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
 import torch
+import base64
 
 # Configuration
 OUTPUT_SIZE = (480, 480)  # Output image size
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 # Step 1: Read JSON files and extract objects with their masks
 def extract_objects_from_folder(folder_path):
@@ -20,7 +20,11 @@ def extract_objects_from_folder(folder_path):
         with open(os.path.join(folder_path, json_file), "r") as f:
             data = json.load(f)
 
-        # Read the corresponding image
+        # Read the corresponding image path
+        if "imagePath" not in data:
+            print(f"Key 'imagePath' missing in {json_file}. Skipping.")
+            continue
+
         image_path = os.path.join(folder_path, data["imagePath"])
         image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
 
@@ -29,7 +33,11 @@ def extract_objects_from_folder(folder_path):
             continue
 
         # Iterate through all shapes in the JSON
-        for shape in data["shapes"]:
+        for shape in data.get("shapes", []):
+            if "points" not in shape:
+                print(f"Key 'points' missing in a shape in {json_file}. Skipping shape.")
+                continue
+
             points = np.array(shape["points"], dtype=np.int32)
             mask = np.zeros((data["imageHeight"], data["imageWidth"]), dtype=np.uint8)
 
@@ -45,20 +53,6 @@ def extract_objects_from_folder(folder_path):
 
 # Step 2: Place objects randomly on the canvas
 def place_objects_on_canvas(objects, output_size, min_visible=0.5, scale_range=(0.5, 1.0)):
-    """
-    Randomly place objects on the canvas with specified constraints.
-
-    Parameters:
-        objects (list): List of tuples (image, mask) for each object.
-        output_size (tuple): Size of the canvas (width, height).
-        min_visible (float): Minimum percentage of the object that must be visible on the canvas.
-        scale_range (tuple): Range of scale factors for resizing objects.
-
-    Returns:
-        canvas (ndarray): Canvas with placed objects.
-        combined_mask (ndarray): Combined mask of all objects.
-        object_metadata (list): Metadata about placed objects, including labels and positions.
-    """
     canvas = np.zeros((output_size[1], output_size[0], 3), dtype=np.uint8)
     combined_mask = np.zeros((output_size[1], output_size[0]), dtype=np.uint8)
     object_metadata = []
@@ -94,17 +88,15 @@ def place_objects_on_canvas(objects, output_size, min_visible=0.5, scale_range=(
         obj_y_end = obj_y_start + (y_end - y_start)
 
         # Place the visible part of the object on the canvas
-        if x_start < x_end and y_start < y_end:  # Ensure there is a visible region
+        if x_start < x_end and y_start < y_end:
             region = canvas[y_start:y_end, x_start:x_end]
             mask_region = combined_mask[y_start:y_end, x_start:x_end]
 
-            # Extract corresponding regions from object image and mask
             object_subregion = obj_image[obj_y_start:obj_y_end, obj_x_start:obj_x_end]
             mask_subregion = obj_mask[obj_y_start:obj_y_end, obj_x_start:obj_x_end]
 
-            # Blend the object into the canvas
             region[mask_subregion > 0] = object_subregion[mask_subregion > 0]
-            mask_region[mask_subregion > 0] = 255  # Update combined mask
+            mask_region[mask_subregion > 0] = 255
 
             # Record metadata about the placed object
             object_points = [
@@ -115,25 +107,31 @@ def place_objects_on_canvas(objects, output_size, min_visible=0.5, scale_range=(
             ]
             object_metadata.append({
                 "label": f"object_{obj_idx}",
-                "points": object_points
+                "points": object_points,
+                "group_id": None,
+                "shape_type": "polygon",
+                "flags": {}
             })
 
     return canvas, combined_mask, object_metadata
 
 
+# Step 3: Save metadata as JSON
 def save_metadata_as_json(output_path, output_size, object_metadata):
-    """
-    Save object metadata as a JSON file.
+    def encode_image_to_base64(image_path):
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
 
-    Parameters:
-        output_path (str): Path to save the JSON file.
-        output_size (tuple): Size of the output image (width, height).
-        object_metadata (list): Metadata about placed objects.
-    """
+    image_data = encode_image_to_base64(output_path)
+
     json_data = {
-        "imageWidth": output_size[0],
+        "version": "5.0.1",
+        "flags": {},
+        "shapes": object_metadata,
+        "imagePath": os.path.basename(output_path),
+        "imageData": image_data,
         "imageHeight": output_size[1],
-        "shapes": object_metadata
+        "imageWidth": output_size[0]
     }
 
     json_file_path = output_path.replace(".jpg", ".json")
@@ -142,95 +140,54 @@ def save_metadata_as_json(output_path, output_size, object_metadata):
     print(f"JSON metadata saved at: {json_file_path}")
 
 
-
-# Step 3: Generate a realistic background using ControlNet
+# Step 4: Generate background using ControlNet
 def generate_background_with_controlnet_only(control_mask, prompt):
-    # Load the pre-trained ControlNet model
     base_model = "runwayml/stable-diffusion-v1-5"
     controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny")
     pipe = StableDiffusionControlNetPipeline.from_pretrained(base_model, controlnet=controlnet)
     pipe = pipe.to(DEVICE)
 
-    # Generate only the background
     control_image = Image.fromarray(control_mask).convert("L")
-
     result = pipe(prompt, image=control_image, guidance_scale=7.5).images[0]
     return np.array(result)
 
 
+# Step 5: Blend objects with soft edges
 def overlay_objects_with_soft_edges(background, canvas, combined_mask, blur_size=5):
-    """
-    Blend objects into the background with minimal edge softening.
-
-    Parameters:
-        background (ndarray): The generated background image.
-        canvas (ndarray): The canvas containing objects.
-        combined_mask (ndarray): The combined mask of all objects.
-        blur_size (int): The size of the Gaussian blur applied to the edge for softening.
-
-    Returns:
-        blended_image (ndarray): The final blended image.
-    """
-    # Ensure mask is binary
-    mask = (combined_mask > 0).astype(np.uint8) * 255  # Convert to binary mask (0 or 255)
-
-    # Create a blurred version of the mask for edge softening
-    softened_mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-
-    # Normalize the softened mask to range [0, 1]
-    softened_mask = softened_mask / 255.0
-
-    # Expand the softened mask to 3 channels for RGB blending
+    mask = (combined_mask > 0).astype(np.uint8) * 255
+    softened_mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0) / 255.0
     softened_mask = np.expand_dims(softened_mask, axis=-1)
 
-    # Blend the canvas (objects) with the background using the softened mask
     blended_image = background * (1 - softened_mask) + canvas * softened_mask
-    blended_image = blended_image.astype(np.uint8)  # Convert back to uint8 format
-
-    return blended_image
+    return blended_image.astype(np.uint8)
 
 
 # Main function
 def main():
-    # Define the folder path containing images and JSON files
-    folder_path = "./images"  # Replace with your folder path
-
-    # Extract objects from the folder
+    folder_path = "./images"
+    folder_out_path = "./output"
     objects = extract_objects_from_folder(folder_path)
 
     if not objects:
         print("No valid objects found in the folder.")
         return
 
-    # Place objects randomly on the canvas with constraints
     canvas, combined_mask, object_metadata = place_objects_on_canvas(
-        objects,
-        output_size=OUTPUT_SIZE,
-        min_visible=0.5,  # Ensure at least 50% of the object is visible
-        scale_range=(0.5, 1.0)  # Scale objects randomly between 50% and 100% of their original size
+        objects, OUTPUT_SIZE, min_visible=0.5, scale_range=(0.1, 0.25)
     )
 
-    # Save the canvas for visualization
-    canvas_path = os.path.join(folder_path, "canvas_preview.jpg")
+    canvas_path = os.path.join(folder_out_path, "canvas_preview.jpg")
     cv2.imwrite(canvas_path, canvas)
-    print(f"Canvas preview saved at: {canvas_path}")
 
-    # Generate the background
     prompt = "a realistic kitchen table."
     background = generate_background_with_controlnet_only(combined_mask, prompt)
 
-    # Overlay objects on the background
     final_image = overlay_objects_with_soft_edges(background, canvas, combined_mask)
-
-    # Save the final image
-    output_path = os.path.join(folder_path, "output_combined.jpg")
+    output_path = os.path.join(folder_out_path, "output_combined.jpg")
     cv2.imwrite(output_path, final_image)
-    print(f"Generated image saved at: {output_path}")
 
-    # Save the metadata as a JSON file
     save_metadata_as_json(output_path, OUTPUT_SIZE, object_metadata)
 
 
-# Run the main function
 if __name__ == "__main__":
     main()
