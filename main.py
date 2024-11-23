@@ -177,9 +177,9 @@ def main():
         "INPUT_FOLDER": "./images",  # Input folder containing images and JSONs
         "OUTPUT_FOLDER": "./output",  # Output folder for generated images
         "OUTPUT_SIZE": (400, 300),  # Size of the output canvas (width, height)
-        "SCALE_RANGE": (0.1, 0.25),  # Range for scaling small objects
+        "SCALE_RANGE": (0.05, 0.15),  # Range for scaling small objects
         "MIN_VISIBLE": 0.5,  # Minimum percentage of the object visible on the canvas
-        "NUM_OBJECTS_RANGE": (3, 7),  # Random range for the number of objects to place
+        "NUM_OBJECTS_RANGE": (1, 5),  # Random range for the number of objects to place
         "PROMPTS": ["a realistic kitchen table.", "a wooden desk.", "a marble countertop."],
         "NUM_IMAGES": 10,  # Total number of images to generate
     }
