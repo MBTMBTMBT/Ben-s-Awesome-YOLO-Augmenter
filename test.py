@@ -195,7 +195,7 @@ def main():
         return
 
     canvas, combined_mask, object_metadata = place_objects_on_canvas(
-        objects, output_size=OUTPUT_SIZE, min_visible=0.5, scale_range=(0.1, 0.25), labels=labels
+        objects, output_size=OUTPUT_SIZE, min_visible=0.5, scale_range=(0.05, 0.25), labels=labels
     )
 
     canvas_path = os.path.join(folder_out_path, "canvas_preview.jpg")
